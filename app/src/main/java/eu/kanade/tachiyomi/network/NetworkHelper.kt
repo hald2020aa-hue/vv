@@ -1,0 +1,88 @@
+package eu.kanade.tachiyomi.network
+
+import android.content.Context
+import eu.kanade.tachiyomi.BuildConfig
+import eu.kanade.tachiyomi.data.preference.PreferencesHelper
+import eu.kanade.tachiyomi.network.interceptor.CloudflareInterceptor
+import eu.kanade.tachiyomi.network.interceptor.UncaughtExceptionInterceptor
+import eu.kanade.tachiyomi.network.interceptor.UserAgentInterceptor
+import exh.log.maybeInjectEHLogger
+import okhttp3.Cache
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
+import okhttp3.dnsoverhttps.DnsOverHttps
+import okhttp3.logging.HttpLoggingInterceptor
+import uy.kohesive.injekt.injectLazy
+import java.io.File
+import java.net.InetAddress
+import java.util.concurrent.TimeUnit
+
+open class NetworkHelper(context: Context) {
+    private val preferences: PreferencesHelper by injectLazy()
+
+    private val cacheDir = File(context.cacheDir, "network_cache")
+
+    private val cacheSize = 5L * 1024 * 1024 // 5 MiB
+
+    open val cookieManager = AndroidCookieJar()
+
+    // SY -->
+    open /* SY <-- */ val legacyClient by lazy {
+        val builder =
+            OkHttpClient.Builder()
+                .cookieJar(cookieManager)
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
+                .callTimeout(2, TimeUnit.MINUTES)
+                .cache(Cache(cacheDir, cacheSize))
+                .addInterceptor(UncaughtExceptionInterceptor())
+                .addInterceptor(UserAgentInterceptor())
+                .maybeInjectEHLogger()
+
+        if (BuildConfig.DEBUG) {
+            val httpLoggingInterceptor =
+                HttpLoggingInterceptor().apply {
+                    level = HttpLoggingInterceptor.Level.HEADERS
+                }
+            builder.addInterceptor(httpLoggingInterceptor)
+        }
+
+        if (preferences.enableDoh()) {
+            builder.dns(
+                DnsOverHttps.Builder().client(builder.build())
+                    .url("https://cloudflare-dns.com/dns-query".toHttpUrl())
+                    .bootstrapDnsHosts(
+                        listOf(
+                            InetAddress.getByName("162.159.36.1"),
+                            InetAddress.getByName("162.159.46.1"),
+                            InetAddress.getByName("1.1.1.1"),
+                            InetAddress.getByName("1.0.0.1"),
+                            InetAddress.getByName("162.159.132.53"),
+                            InetAddress.getByName("2606:4700:4700::1111"),
+                            InetAddress.getByName("2606:4700:4700::1001"),
+                            InetAddress.getByName("2606:4700:4700::0064"),
+                            InetAddress.getByName("2606:4700:4700::6400")
+                        )
+                    )
+                    .build()
+            )
+        }
+
+        builder.build()
+    }
+
+    @Deprecated("Since extension-lib 1.5", ReplaceWith("client"))
+    open val cloudflareClient by lazy {
+        legacyClient.newBuilder()
+            .addInterceptor(CloudflareInterceptor(context, cookieManager) { defaultUserAgent })
+            .maybeInjectEHLogger()
+            .build()
+    }
+
+    @Suppress("DEPRECATION")
+    open val client by lazy { cloudflareClient }
+
+    // Read fresh on every access so a user-changed UA takes effect without an app restart.
+    val defaultUserAgent: String
+        get() = preferences.defaultUserAgent().get().trim()
+}
